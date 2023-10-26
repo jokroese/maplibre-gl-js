@@ -208,7 +208,8 @@ export class Style extends Evented {
     lineAtlas: LineAtlas;
     light: Light;
 
-    _request: Cancelable;
+    _abortController: AbortController;
+    _frameRequest: Cancelable;
     _spriteRequest: Cancelable;
     _layers: {[_: string]: StyleLayer};
     _serializedLayers: {[_: string]: LayerSpecification};
@@ -246,17 +247,8 @@ export class Style extends Evented {
         this.dispatcher.registerMessageHandler('getImages', (mapId, params) => {
             return this.getImages(mapId, params);
         });
-        this.dispatcher.registerMessageHandler('getResource', (mapId, params) => {
-            return new Promise((resolve, reject) => {
-                // HM TODO: change this internal method to return a promise
-                this.getResource(mapId, params, (err, data) => {
-                    if (err) {
-                        reject(err);
-                    } else {
-                        resolve(data);
-                    }
-                });
-            });
+        this.dispatcher.registerMessageHandler('getResource', (mapId, params, abortController) => {
+                return this.getResource(mapId, params, abortController);
         });
         this.imageManager = new ImageManager();
         this.imageManager.setEventedParent(this);
@@ -336,21 +328,24 @@ export class Style extends Evented {
             options.validate : true;
 
         const request = this.map._requestManager.transformRequest(url, ResourceType.Style);
-        this._request = getJSON(request, (error?: Error | null, json?: any | null) => {
-            this._request = null;
-            if (error) {
-                this.fire(new ErrorEvent(error));
-            } else if (json) {
+        this._abortController = new AbortController();
+        getJSON<StyleSpecification>(request, this._abortController).then((json) => {
+            this._abortController = null;
+            if (json) {
                 this._load(json, options, previousStyle);
             }
-        });
+        }).catch((error) => {
+            if (error) {
+                this.fire(new ErrorEvent(error));
+            }
+        });;
     }
 
     loadJSON(json: StyleSpecification, options: StyleSetterOptions & StyleSwapOptions = {}, previousStyle?: StyleSpecification) {
         this.fire(new Event('dataloading', {dataType: 'style'}));
 
-        this._request = browser.frame(() => {
-            this._request = null;
+        this._frameRequest = browser.frame(() => {
+            this._frameRequest = null;
             options.validate = options.validate !== false;
             this._load(json, options, previousStyle);
         });
@@ -1466,9 +1461,13 @@ export class Style extends Evented {
     }
 
     _remove(mapRemoved: boolean = true) {
-        if (this._request) {
-            this._request.cancel();
-            this._request = null;
+        if (this._abortController) {
+            this._abortController.abort();
+            this._abortController = null;
+        }
+        if (this._frameRequest) {
+            this._frameRequest.cancel();
+            this._frameRequest = null;
         }
         if (this._spriteRequest) {
             this._spriteRequest.cancel();
@@ -1619,8 +1618,8 @@ export class Style extends Evented {
         return glypgs;
     }
 
-    getResource(mapId: string | number, params: RequestParameters, callback: ResponseCallback<any>): Cancelable {
-        return makeRequest(params, callback);
+    getResource(mapId: string | number, params: RequestParameters, abortController: AbortController): Promise<any> {
+        return makeRequest(params, abortController);
     }
 
     getGlyphsUrl() {

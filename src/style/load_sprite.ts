@@ -21,32 +21,41 @@ export function loadSprite(
     const spriteArrayLength = spriteArray.length;
     const format = pixelRatio > 1 ? '@2x' : '';
 
-    const combinedRequestsMap: {[requestKey: string]: Cancelable} = {};
+    const jsonRequestsMap: {[requestKey: string]: AbortController} = {};
+    const imageRequestsMap: {[requestKey: string]: Cancelable} = {};
     const jsonsMap: {[id: string]: any} = {};
     const imagesMap: {[id: string]: (HTMLImageElement | ImageBitmap)} = {};
 
     for (const {id, url} of spriteArray) {
         const jsonRequestParameters = requestManager.transformRequest(requestManager.normalizeSpriteURL(url, format, '.json'), ResourceType.SpriteJSON);
         const jsonRequestKey = `${id}_${jsonRequestParameters.url}`; // use id_url as requestMap key to make sure it is unique
-        combinedRequestsMap[jsonRequestKey] = getJSON(jsonRequestParameters, (err?: Error | null, data?: any | null) => {
-            delete combinedRequestsMap[jsonRequestKey];
+        jsonRequestsMap[jsonRequestKey] = new AbortController();
+        // HM TODO: use async await here
+        getJSON<any>(jsonRequestParameters, jsonRequestsMap[jsonRequestKey]).then((data?: any | null) => {
+            delete jsonRequestsMap[jsonRequestKey];
             jsonsMap[id] = data;
-            doOnceCompleted(callback, jsonsMap, imagesMap, err, spriteArrayLength);
+            doOnceCompleted(callback, jsonsMap, imagesMap, spriteArrayLength);
+        }).catch((err) => {
+            delete jsonRequestsMap[jsonRequestKey];
+            callback(err);
         });
 
         const imageRequestParameters = requestManager.transformRequest(requestManager.normalizeSpriteURL(url, format, '.png'), ResourceType.SpriteImage);
         const imageRequestKey = `${id}_${imageRequestParameters.url}`; // use id_url as requestMap key to make sure it is unique
-        combinedRequestsMap[imageRequestKey] = ImageRequest.getImage(imageRequestParameters, (err, img) => {
-            delete combinedRequestsMap[imageRequestKey];
+        imageRequestsMap[imageRequestKey] = ImageRequest.getImage(imageRequestParameters, (err, img) => {
+            if (err) {
+                callback(err);
+            }
+            delete imageRequestsMap[imageRequestKey];
             imagesMap[id] = img;
-            doOnceCompleted(callback, jsonsMap, imagesMap, err, spriteArrayLength);
+            doOnceCompleted(callback, jsonsMap, imagesMap, spriteArrayLength);
         });
     }
 
     return {
         cancel() {
-            for (const requst of Object.values(combinedRequestsMap)) {
-                requst.cancel();
+            for (const requst of Object.values(jsonRequestsMap)) {
+                requst.abort();
             }
         }
     };
@@ -63,14 +72,7 @@ function doOnceCompleted(
     callbackFunc:Callback<{[spriteName: string]: {[id: string]: StyleImage}}>,
     jsonsMap:{[id: string]: any},
     imagesMap:{[id: string]: (HTMLImageElement | ImageBitmap)},
-    err: Error,
     expectedResultCounter: number): void {
-
-    if (err) {
-        callbackFunc(err);
-        return;
-    }
-
     if (expectedResultCounter !== Object.values(jsonsMap).length || expectedResultCounter !==  Object.values(imagesMap).length) {
         // not done yet, nothing to do
         return;

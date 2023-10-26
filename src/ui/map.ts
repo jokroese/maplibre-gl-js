@@ -1828,11 +1828,13 @@ export class Map extends Camera {
         if (typeof style === 'string') {
             const url = style;
             const request = this._requestManager.transformRequest(url, ResourceType.Style);
-            getJSON(request, (error?: Error | null, json?: any | null) => {
+            getJSON<StyleSpecification>(request).then((json) => {
+                if (json) {
+                    this._updateDiff(json, options);
+                }
+            }).catch((error) => {
                 if (error) {
                     this.fire(new ErrorEvent(error));
-                } else if (json) {
-                    this._updateDiff(json, options);
                 }
             });
         } else if (typeof style === 'object') {

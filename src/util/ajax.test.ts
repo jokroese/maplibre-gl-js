@@ -1,7 +1,6 @@
 import {
     getArrayBuffer,
     getJSON,
-    postData,
     AJAXError,
     sameOrigin
 } from './ajax';
@@ -32,7 +31,7 @@ describe('ajax', () => {
         server.respondWith(request => {
             request.respond(404, undefined, '404 Not Found');
         });
-        getArrayBuffer({url: 'http://example.com/test.bin'}, async (error) => {
+        getArrayBuffer({url: 'http://example.com/test.bin'}).catch(async (error) => {
             const ajaxError = error as AJAXError;
             const body = await readAsText(ajaxError.body);
             expect(ajaxError.status).toBe(404);
@@ -48,8 +47,7 @@ describe('ajax', () => {
         server.respondWith(request => {
             request.respond(200, {'Content-Type': 'application/json'}, '{"foo": "bar"}');
         });
-        getJSON({url: ''}, (error, body) => {
-            expect(error).toBeFalsy();
+        getJSON({url: ''}).then((body) => {
             expect(body).toEqual({foo: 'bar'});
             done();
         });
@@ -60,7 +58,7 @@ describe('ajax', () => {
         server.respondWith(request => {
             request.respond(200, {'Content-Type': 'application/json'}, 'how do i even');
         });
-        getJSON({url: ''}, (error) => {
+        getJSON({url: ''}).catch((error) => {
             expect(error).toBeTruthy();
             done();
         });
@@ -71,24 +69,13 @@ describe('ajax', () => {
         server.respondWith(request => {
             request.respond(404, undefined, '404 Not Found');
         });
-        getJSON({url: 'http://example.com/test.json'}, async (error) => {
+        getJSON({url: 'http://example.com/test.json'}).catch(async (error) => {
             const ajaxError = error as AJAXError;
             const body = await readAsText(ajaxError.body);
             expect(ajaxError.status).toBe(404);
             expect(ajaxError.statusText).toBe('Not Found');
             expect(ajaxError.url).toBe('http://example.com/test.json');
             expect(body).toBe('404 Not Found');
-            done();
-        });
-        server.respond();
-    });
-
-    test('postData, 204(no content): no error', done => {
-        server.respondWith(request => {
-            request.respond(204, undefined, undefined);
-        });
-        postData({url: 'api.mapbox.com'}, (error) => {
-            expect(error).toBeNull();
             done();
         });
         server.respond();
@@ -155,7 +142,7 @@ describe('ajax', () => {
         });
 
         test('should be provided to fetch API in getArrayBuffer function', (done) => {
-            getArrayBuffer({url: 'http://example.com/test-params.json', cache: 'force-cache', headers: {'Authorization': 'Bearer 123'}}, () => {
+            getArrayBuffer({url: 'http://example.com/test-params.json', cache: 'force-cache', headers: {'Authorization': 'Bearer 123'}}).then(() => {
                 expect(fetch).toHaveBeenCalledTimes(1);
                 expect(fetch).toHaveBeenCalledWith(expect.objectContaining({url: 'http://example.com/test-params.json', method: 'GET', cache: 'force-cache'}));
                 expect((fetch.mock.calls[0][0] as RequestMock).headers.get('Authorization')).toBe('Bearer 123');
@@ -165,7 +152,7 @@ describe('ajax', () => {
         });
 
         test('should be provided to fetch API in getJSON function', (done) => {
-            getJSON({url: 'http://example.com/test-params.json', cache: 'force-cache', headers: {'Authorization': 'Bearer 123'}}, () => {
+            getJSON({url: 'http://example.com/test-params.json', cache: 'force-cache', headers: {'Authorization': 'Bearer 123'}}).then(() => {
                 expect(fetch).toHaveBeenCalledTimes(1);
                 expect(fetch).toHaveBeenCalledWith(expect.objectContaining({url: 'http://example.com/test-params.json', method: 'GET', cache: 'force-cache'}));
                 expect((fetch.mock.calls[0][0] as RequestMock).headers.get('Authorization')).toBe('Bearer 123');

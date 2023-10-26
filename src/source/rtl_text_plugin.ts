@@ -84,14 +84,10 @@ export const downloadRTLTextPlugin = () => {
     pluginStatus = status.loading;
     sendPluginStateToWorker();
     if (pluginURL) {
-        getArrayBuffer({url: pluginURL}, (error) => {
-            if (error) {
-                triggerPluginCompletionEvent(error);
-            } else {
-                pluginStatus = status.loaded;
-                sendPluginStateToWorker();
-            }
-        });
+        getArrayBuffer({url: pluginURL}).then(() => {
+            pluginStatus = status.loaded;
+            sendPluginStateToWorker();
+        }).catch((error) => triggerPluginCompletionEvent(error));
     }
 };
 

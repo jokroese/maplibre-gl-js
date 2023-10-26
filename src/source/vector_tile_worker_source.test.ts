@@ -81,8 +81,8 @@ describe('vector tile worker source', () => {
 
     test('VectorTileWorkerSource#loadTile reparses tile if the reloadTile has been called during parsing', (done) => {
         const rawTileData = new Uint8Array([]);
-        function loadVectorData(params, callback) {
-            return callback(null, {
+        function loadVectorData() {
+            return Promise.resolve({
                 vectorTile: {
                     layers: {
                         test: {
@@ -159,8 +159,8 @@ describe('vector tile worker source', () => {
 
     test('VectorTileWorkerSource#loadTile reparses tile if reloadTile is called during reparsing', (done) => {
         const rawTileData = new Uint8Array([]);
-        function loadVectorData(params, callback) {
-            return callback(null, {
+        function loadVectorData() {
+            return Promise.resolve({
                 vectorTile: new vt.VectorTile(new Protobuf(rawTileData)),
                 rawData: rawTileData
             });
@@ -272,8 +272,8 @@ describe('vector tile worker source', () => {
     test('VectorTileWorkerSource provides resource timing information', done => {
         const rawTileData = fs.readFileSync(path.join(__dirname, '/../../test/unit/assets/mbsv5-6-18-23.vector.pbf'));
 
-        function loadVectorData(params, callback) {
-            return callback(null, {
+        function loadVectorData() {
+            return Promise.resolve({
                 vectorTile: new vt.VectorTile(new Protobuf(rawTileData)),
                 rawData: rawTileData,
                 cacheControl: null,
@@ -327,8 +327,8 @@ describe('vector tile worker source', () => {
     test('VectorTileWorkerSource provides resource timing information (fallback method)', done => {
         const rawTileData = fs.readFileSync(path.join(__dirname, '/../../test/unit/assets/mbsv5-6-18-23.vector.pbf'));
 
-        function loadVectorData(params, callback) {
-            return callback(null, {
+        function loadVectorData() {
+            return Promise.resolve({
                 vectorTile: new vt.VectorTile(new Protobuf(rawTileData)),
                 rawData: rawTileData,
                 cacheControl: null,

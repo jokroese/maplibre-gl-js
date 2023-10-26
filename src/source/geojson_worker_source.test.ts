@@ -114,10 +114,7 @@ describe('resourceTiming', () => {
         window.performance.getEntriesByName = jest.fn().mockReturnValue([exampleResourceTiming]);
 
         const layerIndex = new StyleLayerIndex(layers);
-        const source = new GeoJSONWorkerSource(actor, layerIndex, [], (params, callback) => {
-            callback(null, geoJson);
-            return {cancel: () => {}};
-        });
+        const source = new GeoJSONWorkerSource(actor, layerIndex, [], async (_params) => { return geoJson as GeoJSON.GeoJSON; });
 
         source.loadData({source: 'testSource', request: {url: 'http://localhost/nonexistent', collectResourceTiming: true}} as LoadGeoJSONParameters)
             .then((result) => {
@@ -149,10 +146,7 @@ describe('resourceTiming', () => {
         jest.spyOn(perf, 'clearMeasures').mockImplementation(() => { return null; });
 
         const layerIndex = new StyleLayerIndex(layers);
-        const source = new GeoJSONWorkerSource(actor, layerIndex, [], (params, callback) => {
-            callback(null, geoJson);
-            return {cancel: () => {}};
-        });
+        const source = new GeoJSONWorkerSource(actor, layerIndex, [], async (_params) => {return geoJson});
 
         source.loadData({source: 'testSource', request: {url: 'http://localhost/nonexistent', collectResourceTiming: true}} as LoadGeoJSONParameters)
             .then((result) => {
@@ -225,12 +219,15 @@ describe('loadData', () => {
         // allows these tests to mimic a message queue building up
         // (regardless of timing)
         const originalLoadGeoJSON = worker.loadGeoJSON;
-        worker.loadGeoJSON = function(params, callback) {
-            const timeout = setTimeout(() => {
-                originalLoadGeoJSON(params, callback);
-            }, 0);
-
-            return {cancel: () => clearTimeout(timeout)};
+        worker.loadGeoJSON = (params, abortController) => {
+            return new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    originalLoadGeoJSON(params, abortController).then(resolve).catch(reject);
+                }, 0);
+                abortController.signal.addEventListener('abort', () => {
+                    clearTimeout(timeout)
+                });
+            });
         };
         return worker;
     }

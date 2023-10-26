@@ -36,41 +36,36 @@ type FetchingState = {
 export type LoadVectorDataCallback = Callback<LoadVectorTileResult>;
 
 export type AbortVectorData = () => void;
-export type LoadVectorData = (params: WorkerTileParameters, callback: LoadVectorDataCallback) => AbortVectorData | void;
+export type LoadVectorData = (params: WorkerTileParameters, abortController: AbortController) => Promise<LoadVectorTileResult>;
 
 /**
  * Loads a vector tile
  */
-function loadVectorTile(params: WorkerTileParameters, callback: LoadVectorDataCallback) {
-    const request = getArrayBuffer(params.request, (err?: Error | null, data?: ArrayBuffer | null, cacheControl?: string | null, expires?: string | null) => {
-        if (err) {
-            callback(err);
-        } else if (data) {
-            try {
-                const vectorTile = new vt.VectorTile(new Protobuf(data));
-                callback(null, {
-                    vectorTile,
-                    rawData: data,
-                    cacheControl,
-                    expires
-                });
-            } catch (ex) {
-                const bytes = new Uint8Array(data);
-                const isGzipped = bytes[0] === 0x1f && bytes[1] === 0x8b;
-                let errorMessage = `Unable to parse the tile at ${params.request.url}, `;
-                if (isGzipped) {
-                    errorMessage += 'please make sure the data is not gzipped and that you have configured the relevant header in the server';
-                } else {
-                    errorMessage += `got error: ${ex.messge}`;
-                }
-                callback(new Error(errorMessage));
-            }
+async function loadVectorTile(params: WorkerTileParameters, abortController: AbortController): Promise<LoadVectorTileResult> {
+    const data = await getArrayBuffer(params.request, abortController);
+    if (!data) {
+        // HM TODO: this is different than before?
+        return;
+    }
+    try {
+        const vectorTile = new vt.VectorTile(new Protobuf(data.resource));
+        return {
+            vectorTile,
+            rawData: data.resource,
+            cacheControl: data.cacheControl,
+            expires: data.expires,
         }
-    });
-    return () => {
-        request.cancel();
-        callback();
-    };
+    } catch (ex) {
+        const bytes = new Uint8Array(data.resource);
+        const isGzipped = bytes[0] === 0x1f && bytes[1] === 0x8b;
+        let errorMessage = `Unable to parse the tile at ${params.request.url}, `;
+        if (isGzipped) {
+            errorMessage += 'please make sure the data is not gzipped and that you have configured the relevant header in the server';
+        } else {
+            errorMessage += `got error: ${ex.messge}`;
+        }
+        throw new Error(errorMessage);
+    }
 }
 
 /**
@@ -110,7 +105,7 @@ export class VectorTileWorkerSource implements WorkerSource {
      * {@link VectorTileWorkerSource#loadVectorData} (which by default expects
      * a `params.url` property) for fetching and producing a VectorTile object.
      */
-    loadTile(params: WorkerTileParameters): Promise<WorkerTileResult> {
+    async loadTile(params: WorkerTileParameters): Promise<WorkerTileResult> {
         const uid = params.uid;
 
         if (!this.loading)
@@ -121,85 +116,75 @@ export class VectorTileWorkerSource implements WorkerSource {
 
         const workerTile = this.loading[uid] = new WorkerTile(params);
 
-        return new Promise((resolve, reject) => {
-            workerTile.abort = this.loadVectorData(params, (err, response) => {
-                delete this.loading[uid];
+        workerTile.abortController = new AbortController();
+        const response = await this.loadVectorData(params, workerTile.abortController);
+        delete this.loading[uid];
 
-                if (err || !response) {
-                    workerTile.status = 'done';
-                    this.loaded[uid] = workerTile;
-                    reject(err);
-                    return;
-                }
-                const rawTileData = response.rawData;
-                const cacheControl = {} as ExpiryData;
-                if (response.expires) cacheControl.expires = response.expires;
-                if (response.cacheControl) cacheControl.cacheControl = response.cacheControl;
+        if (!response) {
+            workerTile.status = 'done';
+            this.loaded[uid] = workerTile;
+            throw new Error('Unable to load vector tile');
+        }
+        const rawTileData = response.rawData;
+        const cacheControl = {} as ExpiryData;
+        if (response.expires) cacheControl.expires = response.expires;
+        if (response.cacheControl) cacheControl.cacheControl = response.cacheControl;
 
-                const resourceTiming = {} as {resourceTiming: any};
-                if (perf) {
-                    const resourceTimingData = perf.finish();
-                    // it's necessary to eval the result of getEntriesByName() here via parse/stringify
-                    // late evaluation in the main thread causes TypeError: illegal invocation
-                    if (resourceTimingData)
-                        resourceTiming.resourceTiming = JSON.parse(JSON.stringify(resourceTimingData));
-                }
+        const resourceTiming = {} as {resourceTiming: any};
+        if (perf) {
+            const resourceTimingData = perf.finish();
+            // it's necessary to eval the result of getEntriesByName() here via parse/stringify
+            // late evaluation in the main thread causes TypeError: illegal invocation
+            if (resourceTimingData)
+                resourceTiming.resourceTiming = JSON.parse(JSON.stringify(resourceTimingData));
+        }
 
-                workerTile.vectorTile = response.vectorTile;
-                workerTile.parse(response.vectorTile, this.layerIndex, this.availableImages, this.actor).then((result) => {
-                    // Transferring a copy of rawTileData because the worker needs to retain its copy.
-                    resolve(extend({rawTileData: rawTileData.slice(0)}, result, cacheControl, resourceTiming));
-                }).catch(reject).finally(() => {
-                    delete this.fetching[uid];
-                });
+        workerTile.vectorTile = response.vectorTile;
+        try {
+            const result = await workerTile.parse(response.vectorTile, this.layerIndex, this.availableImages, this.actor);
+                // Transferring a copy of rawTileData because the worker needs to retain its copy.
+            return extend({rawTileData: rawTileData.slice(0)}, result, cacheControl, resourceTiming);
+        } finally {
+            delete this.fetching[uid];
+        }
 
-                this.loaded = this.loaded || {};
-                this.loaded[uid] = workerTile;
-                // keep the original fetching state so that reload tile can pick it up if the original parse is cancelled by reloads' parse
-                this.fetching[uid] = {rawTileData, cacheControl, resourceTiming};
-            }) as AbortVectorData;
-        });
+        this.loaded = this.loaded || {};
+        this.loaded[uid] = workerTile;
+        // keep the original fetching state so that reload tile can pick it up if the original parse is cancelled by reloads' parse
+        this.fetching[uid] = {rawTileData, cacheControl, resourceTiming};
     }
 
     /**
      * Implements {@link WorkerSource#reloadTile}.
      */
-    reloadTile(params: WorkerTileParameters): Promise<WorkerTileResult> {
-        return new Promise((resolve, reject) => {
-            const uid = params.uid;
-            if (!this.loaded || !this.loaded[uid]) {
-                reject(new Error('should not be trying to reload a tile that was never loaded or has been removed'));
-                return;
+    async reloadTile(params: WorkerTileParameters): Promise<WorkerTileResult> {
+        const uid = params.uid;
+        if (!this.loaded || !this.loaded[uid]) {
+            throw new Error('should not be trying to reload a tile that was never loaded or has been removed');
+        }
+        const workerTile = this.loaded[uid];
+        workerTile.showCollisionBoxes = params.showCollisionBoxes;
+        if (workerTile.status === 'parsing') {
+            const result = await workerTile.parse(workerTile.vectorTile, this.layerIndex, this.availableImages, this.actor);
+            // if we have cancelled the original parse, make sure to pass the rawTileData from the original fetch
+            let parseResult: WorkerTileResult;
+            if (this.fetching[uid]) {
+                const {rawTileData, cacheControl, resourceTiming} = this.fetching[uid];
+                delete this.fetching[uid];
+                parseResult = extend({rawTileData: rawTileData.slice(0)}, result, cacheControl, resourceTiming);
+            } else {
+                parseResult = result;
             }
-            const workerTile = this.loaded[uid];
-            workerTile.showCollisionBoxes = params.showCollisionBoxes;
-            if (workerTile.status === 'parsing') {
-                workerTile.parse(workerTile.vectorTile, this.layerIndex, this.availableImages, this.actor).then(result => {
-                    // if we have cancelled the original parse, make sure to pass the rawTileData from the original fetch
-                    let parseResult: WorkerTileResult;
-                    if (this.fetching[uid]) {
-                        const {rawTileData, cacheControl, resourceTiming} = this.fetching[uid];
-                        delete this.fetching[uid];
-                        parseResult = extend({rawTileData: rawTileData.slice(0)}, result, cacheControl, resourceTiming);
-                    } else {
-                        parseResult = result;
-                    }
-                    resolve(parseResult);
-
-                }).catch(reject);
-                return;
+            return parseResult;
+        }
+        if (workerTile.status === 'done') {
+            // if there was no vector tile data on the initial load, don't try and re-parse tile
+            if (!workerTile.vectorTile) {
+                // HM TODO: what does this mean?
+                return null;
             }
-            if (workerTile.status === 'done') {
-                // if there was no vector tile data on the initial load, don't try and re-parse tile
-                if (!workerTile.vectorTile) {
-                    // HM TODO: what does this mean?
-                    resolve(null);
-                    return;
-                }
-                workerTile.parse(workerTile.vectorTile, this.layerIndex, this.availableImages, this.actor).then(resolve).catch(reject);
-
-            }
-        });
+            return workerTile.parse(workerTile.vectorTile, this.layerIndex, this.availableImages, this.actor);
+        }
     }
 
     /**
@@ -211,8 +196,8 @@ export class VectorTileWorkerSource implements WorkerSource {
     async abortTile(params: TileParameters): Promise<void> {
         const loading = this.loading;
         const uid = params.uid;
-        if (loading && loading[uid] && loading[uid].abort) {
-            loading[uid].abort();
+        if (loading && loading[uid] && loading[uid].abortController) {
+            loading[uid].abortController.abort();
             delete loading[uid];
         }
     }

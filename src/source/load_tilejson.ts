@@ -15,9 +15,9 @@ export function loadTileJson(
     requestManager: RequestManager,
     callback: Callback<TileJSON>
 ): Cancelable {
-    const loaded = function(err: Error, tileJSON: any) {
+    const loaded = function(err: Error, tileJSON?: any) {
         if (err) {
-            return callback(err);
+            return ;
         } else if (tileJSON) {
             const result: any = pick(
                 // explicit source options take precedence over TileJSON
@@ -35,7 +35,9 @@ export function loadTileJson(
     };
 
     if (options.url) {
-        return getJSON(requestManager.transformRequest(options.url, ResourceType.Source), loaded);
+        getJSON(requestManager.transformRequest(options.url, ResourceType.Source))
+            .then(data => loaded(null, data))
+            .catch(err => loaded(err));
     } else {
         return browser.frame(() => loaded(null, options));
     }

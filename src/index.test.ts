@@ -41,8 +41,7 @@ describe('maplibre', () => {
             callback(null, {'foo': 'bar'});
             return {cancel: () => {}};
         });
-        getJSON({url: 'custom://test/url/json'}, (error, data) => {
-            expect(error).toBeFalsy();
+        getJSON({url: 'custom://test/url/json'}).then((data) => {
             expect(data).toEqual({foo: 'bar'});
             expect(protocolCallbackCalled).toBeTruthy();
             done();
@@ -56,8 +55,7 @@ describe('maplibre', () => {
             callback(null, new ArrayBuffer(1));
             return {cancel: () => {}};
         });
-        getArrayBuffer({url: 'custom://test/url/getArrayBuffer'}, async (error, data) => {
-            expect(error).toBeFalsy();
+        getArrayBuffer({url: 'custom://test/url/getArrayBuffer'}).then((data) => {
             expect(data).toBeInstanceOf(ArrayBuffer);
             expect(protocolCallbackCalled).toBeTruthy();
             done();
@@ -95,14 +93,15 @@ describe('maplibre', () => {
         });
     });
 
-    test('#addProtocol - error', () => {
+    test('#addProtocol - error', done => {
         maplibre.addProtocol('custom', (reqParam, callback) => {
             callback(new Error('error'));
             return {cancel: () => { }};
         });
 
-        getJSON({url: 'custom://test/url/json'}, (error) => {
+        getJSON({url: 'custom://test/url/json'}).catch((error) => {
             expect(error).toBeTruthy();
+            done();
         });
     });
 
@@ -113,8 +112,9 @@ describe('maplibre', () => {
                 cancelCalled = true;
             }};
         });
-        const request = getJSON({url: 'custom://test/url/json'}, () => { });
-        request.cancel();
+        const abortController = new AbortController();
+        getJSON({url: 'custom://test/url/json'}, abortController);
+        abortController.abort();
         expect(cancelCalled).toBeTruthy();
     });
 

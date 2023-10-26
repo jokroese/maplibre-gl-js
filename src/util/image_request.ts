@@ -127,7 +127,7 @@ export namespace ImageRequest {
             requestParameters.headers.accept = 'image/webp,*/*';
         }
 
-        const request:ImageRequestQueueItem = {
+        const request: ImageRequestQueueItem = {
             requestParameters,
             supportImageRefresh,
             callback,
@@ -181,28 +181,27 @@ export namespace ImageRequest {
             !getProtocolAction(requestParameters.url) &&
             (!requestParameters.headers ||
                 Object.keys(requestParameters.headers).reduce((acc, item) => acc && item === 'accept', true));
-
+        
+        const abortController = new AbortController();
         const action = canUseHTMLImageElement ? getImageUsingHtmlImage : makeRequest;
-        return action(
-            requestParameters,
-            (err?: Error | null,
-                data?: HTMLImageElement | ImageBitmap | ArrayBuffer | null,
-                cacheControl?: string | null,
-                expires?: string | null) => {
-                onImageResponse(itemInQueue, callback, err, data, cacheControl, expires);
-            });
+        action(requestParameters, abortController).then((data: {resource: HTMLImageElement | ImageBitmap | ArrayBuffer | null} & ExpiryData) => {
+            onImageResponse(itemInQueue, callback, data.resource , data.cacheControl, data.expires);
+        });
+
+        return {
+            cancel: () => {
+                abortController.abort();
+            }
+        }
     };
 
     const onImageResponse = (
         itemInQueue: ImageRequestQueueItem,
         callback:GetImageCallback,
-        err?: Error | null,
         data?: HTMLImageElement | ImageBitmap | ArrayBuffer | null,
         cacheControl?: string | null,
-        expires?: string | null): void => {
-        if (err) {
-            callback(err);
-        } else if (data instanceof HTMLImageElement || isImageBitmap(data)) {
+        expires?: string | Date | null): void => {
+        if (data instanceof HTMLImageElement || isImageBitmap(data)) {
             // User using addProtocol can directly return HTMLImageElement/ImageBitmap type
             // If HtmlImageElement is used to get image then response type will be HTMLImageElement
             callback(null, data);
@@ -252,7 +251,7 @@ export namespace ImageRequest {
         }
     };
 
-    const getImageUsingHtmlImage = (requestParameters: RequestParameters, callback: GetImageCallback): Cancelable  => {
+    const getImageUsingHtmlImage = (requestParameters: RequestParameters, abortController: AbortController): Promise<{resource: HTMLImageElementWithPriority } & ExpiryData> => {
         const image = new Image() as HTMLImageElementWithPriority;
         const url = requestParameters.url;
         let requestCancelled = false;
@@ -264,24 +263,25 @@ export namespace ImageRequest {
         }
 
         image.fetchPriority = 'high';
-        image.onload = () => {
-            callback(null, image);
-            image.onerror = image.onload = null;
-        };
-        image.onerror = () => {
-            if (!requestCancelled) {
-                callback(new Error('Could not load image. Please make sure to use a supported image type such as PNG or JPEG. Note that SVGs are not supported.'));
-            }
-            image.onerror = image.onload = null;
-        };
-        image.src = url;
-        return {
-            cancel: () => {
+        return new Promise((resolve, reject) => {
+            image.onload = () => {
+                resolve({resource: image});
+                image.onerror = image.onload = null;
+            };
+            image.onerror = () => {
+                if (!requestCancelled) {
+                    reject(new Error('Could not load image. Please make sure to use a supported image type such as PNG or JPEG. Note that SVGs are not supported.'));
+                }
+                image.onerror = image.onload = null;
+            };
+            abortController.signal.addEventListener('abort', () => {
                 requestCancelled = true;
                 // Set src to '' to actually cancel the request
                 image.src = '';
-            }
-        };
+            });
+
+            image.src = url;
+        });
     };
 }
 

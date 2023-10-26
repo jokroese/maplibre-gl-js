@@ -22,17 +22,15 @@ export function loadGlyphRange(fontstack: string,
         ResourceType.Glyphs
     );
 
-    getArrayBuffer(request, (err?: Error | null, data?: ArrayBuffer | null) => {
-        if (err) {
-            callback(err);
-        } else if (data) {
+    getArrayBuffer(request).then((data) => {
+        if (data) {
             const glyphs = {};
 
-            for (const glyph of parseGlyphPbf(data)) {
+            for (const glyph of parseGlyphPbf(data.resource)) {
                 glyphs[glyph.id] = glyph;
             }
 
             callback(null, glyphs);
         }
-    });
+    }).catch((err) => callback(err));
 }

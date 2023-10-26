@@ -7,7 +7,7 @@ import vtpbf from 'vt-pbf';
 import Supercluster, {type Options as SuperclusterOptions, type ClusterProperties} from 'supercluster';
 import geojsonvt, {type Options as GeoJSONVTOptions} from 'geojson-vt';
 import {VectorTileWorkerSource} from './vector_tile_worker_source';
-import {createExpression} from '@maplibre/maplibre-gl-style-spec';
+import {createExpression, type Feature} from '@maplibre/maplibre-gl-style-spec';
 
 import type {
     WorkerTileParameters,
@@ -17,7 +17,7 @@ import type {
 import type {IActor} from '../util/actor';
 import type {StyleLayerIndex} from '../style/style_layer_index';
 
-import type {LoadVectorDataCallback} from './vector_tile_worker_source';
+import type {LoadVectorData, LoadVectorDataCallback, LoadVectorTileResult} from './vector_tile_worker_source';
 import type {RequestParameters, ResponseCallback} from '../util/ajax';
 import type {Cancelable} from '../types/cancelable';
 import {isUpdateableGeoJSON, type GeoJSONSourceDiff, applySourceDiff, toUpdateable, GeoJSONFeatureId} from './geojson_source_diff';
@@ -44,7 +44,7 @@ export type LoadGeoJSONParameters = GeoJSONWorkerOptions & {
     dataDiff?: GeoJSONSourceDiff;
 };
 
-export type LoadGeoJSON = (params: LoadGeoJSONParameters, callback: ResponseCallback<any>) => Cancelable;
+export type LoadGeoJSON = (params: LoadGeoJSONParameters, abortController: AbortController) => Promise<GeoJSON.GeoJSON>;
 
 type GeoJSONIndex = ReturnType<typeof geojsonvt> | Supercluster;
 
@@ -58,7 +58,7 @@ type GeoJSONIndex = ReturnType<typeof geojsonvt> | Supercluster;
  */
 export class GeoJSONWorkerSource extends VectorTileWorkerSource {
     _pendingPromise: (value: GeoJSONWorkerSourceLoadDataResult) => void;
-    _pendingRequest: Cancelable;
+    _pendingRequest: AbortController;
     _geoJSONIndex: GeoJSONIndex;
     _dataUpdateable = new Map<GeoJSONFeatureId, GeoJSON.Feature>();
 
@@ -75,16 +75,16 @@ export class GeoJSONWorkerSource extends VectorTileWorkerSource {
         }
     }
 
-    loadGeoJSONTile(params: WorkerTileParameters, callback: LoadVectorDataCallback): (() => void) | void {
+    async loadGeoJSONTile(params: WorkerTileParameters, abortController: AbortController): Promise<LoadVectorTileResult> {
         const canonical = params.tileID.canonical;
 
         if (!this._geoJSONIndex) {
-            return callback(null, null);  // we couldn't load the file
+            return;
         }
 
         const geoJSONTile = this._geoJSONIndex.getTile(canonical.z, canonical.x, canonical.y);
         if (!geoJSONTile) {
-            return callback(null, null); // nothing in the given tile
+            return;
         }
 
         const geojsonWrapper = new GeoJSONWrapper(geoJSONTile.features);
@@ -97,10 +97,10 @@ export class GeoJSONWorkerSource extends VectorTileWorkerSource {
             pbf = new Uint8Array(pbf);
         }
 
-        callback(null, {
+        return {
             vectorTile: geojsonWrapper,
             rawData: pbf.buffer
-        });
+        };
     }
 
     /**
@@ -119,7 +119,7 @@ export class GeoJSONWorkerSource extends VectorTileWorkerSource {
      * @param callback - the callback for completion or error
      */
     loadData(params: LoadGeoJSONParameters): Promise<GeoJSONWorkerSourceLoadDataResult> {
-        this._pendingRequest?.cancel();
+        this._pendingRequest?.abort();
         if (this._pendingPromise) {
             // Tell the foreground the previous call has been abandoned
             this._pendingPromise({abandoned: true});
@@ -129,12 +129,13 @@ export class GeoJSONWorkerSource extends VectorTileWorkerSource {
                 new RequestPerformance(params.request) : false;
 
             this._pendingPromise = resolve;
-            this._pendingRequest = this.loadGeoJSON(params, (err?: Error | null, data?: any | null) => {
+            this._pendingRequest = new AbortController();
+            this.loadGeoJSON(params, this._pendingRequest).then((data) => {
                 delete this._pendingPromise;
                 delete this._pendingRequest;
 
-                if (err || !data) {
-                    reject(err);
+                if (!data) {
+                    reject(new Error('No data was returned'));
                     return;
                 }
                 if (typeof data !== 'object') {
@@ -149,12 +150,12 @@ export class GeoJSONWorkerSource extends VectorTileWorkerSource {
                         if (compiled.result === 'error')
                             throw new Error(compiled.value.map(err => `${err.key}: ${err.message}`).join(', '));
 
-                        const features = data.features.filter(feature => compiled.value.evaluate({zoom: 0}, feature));
+                        const features = (data as GeoJSON.FeatureCollection).features.filter(feature => compiled.value.evaluate({zoom: 0}, feature as any));
                         data = {type: 'FeatureCollection', features};
                     }
 
                     this._geoJSONIndex = params.cluster ?
-                        new Supercluster(getSuperclusterOptions(params)).load(data.features) :
+                        new Supercluster(getSuperclusterOptions(params)).load((data as any).features) :
                         geojsonvt(data, params.geojsonVtOptions);
                 } catch (err) {
                     reject(err);
@@ -174,7 +175,7 @@ export class GeoJSONWorkerSource extends VectorTileWorkerSource {
                     }
                 }
                 resolve(result);
-            });
+            }).catch((err) => { reject(err); });
         });
     }
 
@@ -206,45 +207,36 @@ export class GeoJSONWorkerSource extends VectorTileWorkerSource {
      * expected as a literal (string or object) `params.data`.
      *
      * @param params - the parameters
-     * @param callback - the callback for completion or error
-     * @returns A Cancelable object.
+     * @returns A promise.
      */
-    loadGeoJSON = (params: LoadGeoJSONParameters, callback: ResponseCallback<any>): Cancelable => {
+    loadGeoJSON = async (params: LoadGeoJSONParameters, abortController: AbortController): Promise<GeoJSON.GeoJSON> => {
         const {promoteId} = params;
         // Because of same origin issues, urls must either include an explicit
         // origin or absolute path.
         // ie: /foo/bar.json or http://example.com/bar.json
         // but not ../foo/bar.json
         if (params.request) {
-            return getJSON(params.request, (
-                error?: Error,
-                data?: any,
-                cacheControl?: string,
-                expires?: string
-            ) => {
-                this._dataUpdateable = isUpdateableGeoJSON(data, promoteId) ? toUpdateable(data, promoteId) : undefined;
-                callback(error, data, cacheControl, expires);
-            });
-        } else if (typeof params.data === 'string') {
+            const data = await getJSON<GeoJSON.FeatureCollection>(params.request, abortController);
+            this._dataUpdateable = isUpdateableGeoJSON(data, promoteId) ? toUpdateable(data, promoteId) : undefined;
+            return data;
+        }
+        if (typeof params.data === 'string') {
             try {
-                const parsed = JSON.parse(params.data);
+                const parsed = JSON.parse(params.data) as GeoJSON.FeatureCollection;
                 this._dataUpdateable = isUpdateableGeoJSON(parsed, promoteId) ? toUpdateable(parsed, promoteId) : undefined;
-                callback(null, parsed);
+                return parsed;
             } catch (e) {
-                callback(new Error(`Input data given to '${params.source}' is not a valid GeoJSON object.`));
+                throw new Error(`Input data given to '${params.source}' is not a valid GeoJSON object.`);
             }
-        } else if (params.dataDiff) {
+        }
+        if (params.dataDiff) {
             if (this._dataUpdateable) {
                 applySourceDiff(this._dataUpdateable, params.dataDiff, promoteId);
-                callback(null, {type: 'FeatureCollection', features: Array.from(this._dataUpdateable.values())});
-            } else {
-                callback(new Error(`Cannot update existing geojson data in ${params.source}`));
+                return {type: 'FeatureCollection', features: Array.from(this._dataUpdateable.values())};
             }
-        } else {
-            callback(new Error(`Input data given to '${params.source}' is not a valid GeoJSON object.`));
-        }
-
-        return {cancel: () => {}};
+            throw new Error(`Cannot update existing geojson data in ${params.source}`);
+        } 
+        throw new Error(`Input data given to '${params.source}' is not a valid GeoJSON object.`);
     };
 
     async removeSource(_params: RemoveSourceParams): Promise<void> {

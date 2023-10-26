@@ -1,8 +1,16 @@
-import {extend, warnOnce, isWorker} from './util';
+import {extend, isWorker} from './util';
 import {config} from './config';
 
 import type {Callback} from '../types/callback';
-import type {Cancelable} from '../types/cancelable';
+
+/**
+ * A type used to store the tile's expiration date and cache control definition
+ */
+export type ExpiryData = {cacheControl?: string | null; expires?: Date | string | null};
+
+export type GetResourceResponse = ExpiryData & {
+    resource: ArrayBuffer | string | Object;
+}
 
 /**
  * A `RequestParameters` object to be returned from Map.options.transformRequest callbacks.
@@ -120,8 +128,7 @@ export const getProtocolAction = url => config.REGISTERED_PROTOCOLS[url.substrin
 // via a file:// URL.
 const isFileURL = url => /^file:/.test(url) || (/^file:/.test(getReferrer()) && !/^\w+:/.test(url));
 
-function makeFetchRequest(requestParameters: RequestParameters, callback: ResponseCallback<any>): Cancelable {
-    const controller = new AbortController();
+async function makeFetchRequest(requestParameters: RequestParameters, abortController: AbortController): Promise<GetResourceResponse> {
     const request = new Request(requestParameters.url, {
         method: requestParameters.method || 'GET',
         body: requestParameters.body,
@@ -129,154 +136,121 @@ function makeFetchRequest(requestParameters: RequestParameters, callback: Respon
         headers: requestParameters.headers,
         cache: requestParameters.cache,
         referrer: getReferrer(),
-        signal: controller.signal
+        signal: abortController.signal
     });
-    let complete = false;
     let aborted = false;
+    abortController.signal.addEventListener('abort', () => {
+        aborted = true;
+    });
 
     if (requestParameters.type === 'json') {
         request.headers.set('Accept', 'application/json');
     }
 
-    const validateOrFetch = (err, cachedResponse?, responseIsFresh?) => {
-        if (aborted) return;
-
-        if (err) {
-            // Do fetch in case of cache error.
-            // HTTP pages in Edge trigger a security error that can be ignored.
-            if (err.message !== 'SecurityError') {
-                warnOnce(err);
-            }
+    try {
+        const response = await fetch(request);  
+        if (!response.ok) {
+            const body = await response.blob();
+            throw new AJAXError(response.status, response.statusText, requestParameters.url, body);
         }
-
-        if (cachedResponse && responseIsFresh) {
-            return finishRequest(cachedResponse);
-        }
-
-        if (cachedResponse) {
-            // We can't do revalidation with 'If-None-Match' because then the
-            // request doesn't have simple cors headers.
-        }
-
-        fetch(request).then(response => {
-            if (response.ok) {
-                return finishRequest(response);
-
-            } else {
-                return response.blob().then(body => callback(new AJAXError(response.status, response.statusText, requestParameters.url, body)));
-            }
-        }).catch(error => {
-            if (error.code === 20) {
-                // silence expected AbortError
-                return;
-            }
-            callback(new Error(error.message));
-        });
-    };
-
-    const finishRequest = (response) => {
-        (
-            (requestParameters.type === 'arrayBuffer' || requestParameters.type === 'image') ? response.arrayBuffer() :
-                requestParameters.type === 'json' ? response.json() :
-                    response.text()
-        ).then(result => {
+        const promise = requestParameters.type === 'arrayBuffer' || requestParameters.type === 'image' ? response.arrayBuffer() :
+                requestParameters.type === 'json' ? response.json() : response.text();
+        try {
+            const result: string | ArrayBuffer | Object = await promise;
             if (aborted) return;
-            complete = true;
-            callback(null, result, response.headers.get('Cache-Control'), response.headers.get('Expires'));
-        }).catch(err => {
-            if (!aborted) callback(new Error(err.message));
-        });
-    };
-
-    validateOrFetch(null, null);
-
-    return {cancel: () => {
-        aborted = true;
-        if (!complete) controller.abort();
-    }};
-}
-
-function makeXMLHttpRequest(requestParameters: RequestParameters, callback: ResponseCallback<any>): Cancelable {
-    const xhr: XMLHttpRequest = new XMLHttpRequest();
-
-    xhr.open(requestParameters.method || 'GET', requestParameters.url, true);
-    if (requestParameters.type === 'arrayBuffer' || requestParameters.type === 'image') {
-        xhr.responseType = 'arraybuffer';
-    }
-    for (const k in requestParameters.headers) {
-        xhr.setRequestHeader(k, requestParameters.headers[k]);
-    }
-    if (requestParameters.type === 'json') {
-        xhr.responseType = 'text';
-        xhr.setRequestHeader('Accept', 'application/json');
-    }
-    xhr.withCredentials = requestParameters.credentials === 'include';
-    xhr.onerror = () => {
-        callback(new Error(xhr.statusText));
-    };
-    xhr.onload = () => {
-        if (((xhr.status >= 200 && xhr.status < 300) || xhr.status === 0) && xhr.response !== null) {
-            let data: unknown = xhr.response;
-            if (requestParameters.type === 'json') {
-                // We're manually parsing JSON here to get better error messages.
-                try {
-                    data = JSON.parse(xhr.response);
-                } catch (err) {
-                    return callback(err);
-                }
+            return { resource: result, cacheControl: response.headers.get('Cache-Control'), expires: response.headers.get('Expires') };
+        } catch (err) {
+            if (!aborted) {
+                throw new Error(err.message);
             }
-            callback(null, data, xhr.getResponseHeader('Cache-Control'), xhr.getResponseHeader('Expires'));
-        } else {
-            const body = new Blob([xhr.response], {type: xhr.getResponseHeader('Content-Type')});
-            callback(new AJAXError(xhr.status, xhr.statusText, requestParameters.url, body));
         }
+    } catch (error) {
+        if (error.code === 20) {
+            // silence expected AbortError
+            return;
+        }
+        throw new Error(error.message);
     };
-    xhr.send(requestParameters.body);
-    return {cancel: () => xhr.abort()};
 }
 
-export const makeRequest = function(requestParameters: RequestParameters, callback: ResponseCallback<any>): Cancelable {
-    // We're trying to use the Fetch API if possible. However, in some situations we can't use it:
-    // - IE11 doesn't support it at all. In this case, we dispatch the request to the main thread so
-    //   that we can get an accruate referrer header.
-    // - Safari exposes window.AbortController, but it doesn't work actually abort any requests in
-    //   some versions (see https://bugs.webkit.org/show_bug.cgi?id=174980#c2)
-    // - Requests for resources with the file:// URI scheme don't work with the Fetch API either. In
-    //   this case we unconditionally use XHR on the current thread since referrers don't matter.
+function makeXMLHttpRequest(requestParameters: RequestParameters, abortController?: AbortController): Promise<GetResourceResponse> {
+    return new Promise((resolve, reject) => {
+        const xhr: XMLHttpRequest = new XMLHttpRequest();
+
+        xhr.open(requestParameters.method || 'GET', requestParameters.url, true);
+        if (requestParameters.type === 'arrayBuffer' || requestParameters.type === 'image') {
+            xhr.responseType = 'arraybuffer';
+        }
+        for (const k in requestParameters.headers) {
+            xhr.setRequestHeader(k, requestParameters.headers[k]);
+        }
+        if (requestParameters.type === 'json') {
+            xhr.responseType = 'text';
+            xhr.setRequestHeader('Accept', 'application/json');
+        }
+        xhr.withCredentials = requestParameters.credentials === 'include';
+        xhr.onerror = () => {
+            reject(new Error(xhr.statusText));
+        };
+        xhr.onload = () => {
+            if (((xhr.status >= 200 && xhr.status < 300) || xhr.status === 0) && xhr.response !== null) {
+                let data: unknown = xhr.response;
+                if (requestParameters.type === 'json') {
+                    // We're manually parsing JSON here to get better error messages.
+                    try {
+                        data = JSON.parse(xhr.response);
+                    } catch (err) {
+                        reject(err);
+                        return;
+                    }
+                }
+                resolve({resource: data, cacheControl: xhr.getResponseHeader('Cache-Control'), expires: xhr.getResponseHeader('Expires')});
+            } else {
+                const body = new Blob([xhr.response], {type: xhr.getResponseHeader('Content-Type')});
+                reject(new AJAXError(xhr.status, xhr.statusText, requestParameters.url, body));
+            }
+        };
+        if (abortController) {
+            abortController.signal.addEventListener('abort', () => {
+                xhr.abort();
+            });
+        }
+        xhr.send(requestParameters.body);
+    });
+}
+
+export const makeRequest = (requestParameters: RequestParameters, abortController: AbortController): Promise<GetResourceResponse> => {
+    // We're trying to use the Fetch API if possible.
+    // However, requests for resources with the file:// URI scheme don't work with the Fetch API either. 
+    // In this case we unconditionally use XHR on the current thread since referrers don't matter.
     if (/:\/\//.test(requestParameters.url) && !(/^https?:|^file:/.test(requestParameters.url))) {
         if (isWorker(self) && self.worker && self.worker.actor) {
-            return self.worker.actor.send('getResource', requestParameters, callback);
+            return self.worker.actor.sendAsync({ type: 'getResource', data: requestParameters}, abortController);
         }
         if (!isWorker(self)) {
             const action = getProtocolAction(requestParameters.url) || makeFetchRequest;
-            return action(requestParameters, callback);
+            // HM TODO: fix this!
+            //return action(requestParameters, callback);
         }
     }
     if (!isFileURL(requestParameters.url)) {
         if (fetch && Request && AbortController && Object.prototype.hasOwnProperty.call(Request.prototype, 'signal')) {
-            return makeFetchRequest(requestParameters, callback);
+            return makeFetchRequest(requestParameters, abortController);
         }
         if (isWorker(self) && self.worker && self.worker.actor) {
-            const queueOnMainThread = true;
-            return self.worker.actor.send('getResource', requestParameters, callback, undefined, queueOnMainThread);
+            return self.worker.actor.sendAsync({type: 'getResource', data: requestParameters, mustQueue: true}, abortController);
         }
     }
-    return makeXMLHttpRequest(requestParameters, callback);
+    return makeXMLHttpRequest(requestParameters, abortController);
 };
 
-export const getJSON = function(requestParameters: RequestParameters, callback: ResponseCallback<any>): Cancelable {
-    return makeRequest(extend(requestParameters, {type: 'json'}), callback);
+export const getJSON = async <T>(requestParameters: RequestParameters, abortController?: AbortController): Promise<T> => {
+    let response = await makeRequest(extend(requestParameters, {type: 'json'}), abortController || new AbortController());
+    return response.resource as T;
 };
 
-export const getArrayBuffer = function(
-    requestParameters: RequestParameters,
-    callback: ResponseCallback<ArrayBuffer>
-): Cancelable {
-    return makeRequest(extend(requestParameters, {type: 'arrayBuffer'}), callback);
-};
-
-export const postData = function(requestParameters: RequestParameters, callback: ResponseCallback<string>): Cancelable {
-    return makeRequest(extend(requestParameters, {method: 'POST'}), callback);
+export const getArrayBuffer = (requestParameters: RequestParameters, abortController?: AbortController): Promise<GetResourceResponse & { resource: ArrayBuffer}> => {
+    return makeRequest(extend(requestParameters, {type: 'arrayBuffer'}), abortController || new AbortController()) as Promise<GetResourceResponse & { resource: ArrayBuffer}>;
 };
 
 export function sameOrigin(inComingUrl: string) {
@@ -295,11 +269,8 @@ export function sameOrigin(inComingUrl: string) {
     const locationObj = window.location;
     return urlObj.protocol === locationObj.protocol && urlObj.host === locationObj.host;
 }
-/**
- * A type used to store the tile's expiration date and cache control definition
- */
-export type ExpiryData = {cacheControl?: string | null; expires?: Date | string | null};
-export const getVideo = function(urls: Array<string>, callback: Callback<HTMLVideoElement>): Cancelable {
+
+export const getVideo = (urls: Array<string>, callback: Callback<HTMLVideoElement>) => {
     const video: HTMLVideoElement = window.document.createElement('video');
     video.muted = true;
     video.onloadstart = function() {
@@ -313,5 +284,4 @@ export const getVideo = function(urls: Array<string>, callback: Callback<HTMLVid
         s.src = urls[i];
         video.appendChild(s);
     }
-    return {cancel: () => {}};
 };
