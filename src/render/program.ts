@@ -15,6 +15,7 @@ import type {BinderUniform} from '../data/program_configuration';
 import {terrainPreludeUniforms, TerrainPreludeUniformsType} from './program/terrain_program';
 import type {TerrainData} from '../render/terrain';
 import {Terrain} from '../render/terrain';
+import { isWebGL2 } from '../gl/webgl2';
 
 export type DrawMode = WebGLRenderingContextBase['LINES'] | WebGLRenderingContextBase['TRIANGLES'] | WebGL2RenderingContext['LINE_STRIP'];
 
@@ -56,6 +57,13 @@ export class Program<Us extends UniformBindings> {
 
         const gl = context.gl;
         this.program = gl.createProgram();
+
+        if (!isWebGL2(gl)) {
+            const ext = gl.getExtension('OES_element_index_uint');
+            if (!ext) {
+                console.warn('Using WebGL1 context but OES_element_index_uint extension is not supported.');
+            }
+        }
 
         const staticAttrInfo = getTokenizedAttributesAndUniforms(source.staticAttributes);
         const dynamicAttrInfo = configuration ? configuration.getBinderAttributes() : [];
@@ -226,8 +234,8 @@ export class Program<Us extends UniformBindings> {
             gl.drawElements(
                 drawMode,
                 segment.primitiveLength * primitiveSize,
-                gl.UNSIGNED_SHORT,
-                segment.primitiveOffset * primitiveSize * 2);
+                gl.UNSIGNED_INT,
+                segment.primitiveOffset * primitiveSize * 4);
         }
     }
 }
